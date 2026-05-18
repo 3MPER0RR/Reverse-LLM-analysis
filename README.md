@@ -153,4 +153,4 @@ No other dependencies. ELF and PE parsing is done with stdlib `struct`.
 
 ---
 
-![Screen](Screen.png)
+<img src="Screen.png" width="500">
