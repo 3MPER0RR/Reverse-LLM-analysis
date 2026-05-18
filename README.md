@@ -1,4 +1,4 @@
-# BinProbe
+# RVLLM Analysis
 
 LLM-assisted static reverse engineering tool. Disassembles ELF and PE binaries, identifies interesting code patterns, and uses an LLM to explain what the code does in plain English.
 
@@ -42,7 +42,7 @@ Drop an unknown binary, get a markdown report.
 ## Install
 
 ```bash
-git clone https://github.com/3MPER0RR/binprobe
+git clone https://github.com/3MPER0RR/Reverse-LLM-analysis
 cd binprobe
 python3 -m venv env
 source env/bin/activate
@@ -57,13 +57,13 @@ Tested on Python 3.10+, macOS and Linux.
 
 ```bash
 # analyze a PE
-python3 binprobe.py target.exe --backend groq
+python3 rvllm.py target.exe --backend groq
 
 # analyze an ELF
-python3 binprobe.py target_elf --backend groq
+python3 rvllm.py target_elf --backend groq
 
 # use Claude instead of Groq
-python3 binprobe.py target.exe --backend claude
+python3 rvllm.py target.exe --backend claude
 ```
 
 Report is written to `binprobe_out/<binary>_<md5[:8]>.md`.
@@ -84,11 +84,11 @@ API_KEYS = {
 ACTIVE_BACKEND = "groq"   # default backend
 
 BLOCK_WINDOW = 40         # instructions around each hotspot
-MAX_BLOCKS   = 3          # max blocks sent to LLM per run (cost control)
-OUTPUT_DIR   = "./binprobe_out"
+MAX_BLOCKS   = 3-7          # max blocks sent to LLM per run (cost control)
+OUTPUT_DIR   = "./rvllm_out"
 ```
 
-For Groq free tier, keep `MAX_BLOCKS` at 3-6 and add a sleep between calls to avoid rate limits:
+For Groq free tier, keep `MAX_BLOCKS` at 3-7 and add a sleep between calls to avoid rate limits:
 
 ```python
 import time
