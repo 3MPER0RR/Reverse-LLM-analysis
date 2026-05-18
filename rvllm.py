@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# binprobe.py - LLM-assisted reverse engineering tool
+# rvllm.py - LLM-assisted reverse engineering tool
 # disassembles ELF and PE binaries, identifies interesting code patterns,
 # and uses an LLM to explain what the code does in plain english
 #
@@ -37,7 +37,7 @@ BLOCK_WINDOW = 40
 MAX_BLOCKS = 7
 
 # output dir for reports
-OUTPUT_DIR = "./binprobe_out"
+OUTPUT_DIR = "./rvllm_out"
 
 
 # ----------------------------------------------------------------
@@ -117,7 +117,6 @@ class ELFParser:
             self.segments.append((p_type, p_offset, p_vaddr, p_filesz))
 
     def get_text(self):
-        # prefer .text, fall back to first executable LOAD segment
         if ".text" in self.sections:
             off, sz, vaddr = self.sections[".text"]
             return self.data[off:off+sz], vaddr
@@ -129,7 +128,6 @@ class ELFParser:
         raise RuntimeError("cannot find executable code section")
 
     def get_strings(self, min_len=5):
-        # pull printable strings from .rodata, or whole binary if stripped
         if ".rodata" in self.sections:
             off, sz, _ = self.sections[".rodata"]
             data = self.data[off:off+sz]
@@ -150,46 +148,34 @@ class ELFParser:
 # ----------------------------------------------------------------
 # PE parser — raw struct, no pefile dependency
 # handles PE32 (x86) and PE32+ (x86-64)
-#
-# PE layout recap (what we actually need):
-#   [0x00] MZ header  -> e_lfanew at 0x3c points to PE signature
-#   [e_lfanew] "PE\0\0" + COFF header (20 bytes)
-#   [+20] Optional header: Magic 0x10b=PE32, 0x20b=PE32+
-#   sections table follows optional header
-#   Import Directory Table lives in the data directories (index 1)
-#   IAT (Import Address Table) is where call targets land at runtime
 # ----------------------------------------------------------------
 class PEParser:
-    # COFF machine types
     IMAGE_FILE_MACHINE_I386  = 0x014c
     IMAGE_FILE_MACHINE_AMD64 = 0x8664
 
     def __init__(self, data: bytes):
-        self.data     = data
-        self.arch     = None
-        self.mode     = None
-        self.sections = {}   # name -> (file_offset, size, vaddr)  [vaddr = RVA]
-        self.entry    = 0
-        self.image_base = 0  # PE32+ default 0x140000000, PE32 0x400000
-        self.bits     = 64
-        # import table info, filled by _parse_imports
-        self.imports  = {}   # RVA -> "dll!funcname"
+        self.data       = data
+        self.arch       = None
+        self.mode       = None
+        self.sections   = {}
+        self.entry      = 0
+        self.image_base = 0
+        self.bits       = 64
+        self.imports    = {}   # RVA -> "DLL!func"
 
     def parse(self):
         d = self.data
         if d[:2] != b"MZ":
             raise ValueError("not a PE file")
 
-        # e_lfanew: offset to PE signature, at MZ+0x3c
         e_lfanew = struct.unpack_from("<I", d, 0x3c)[0]
         if d[e_lfanew:e_lfanew+4] != b"PE\x00\x00":
             raise ValueError("PE signature not found")
 
-        coff_base = e_lfanew + 4  # COFF header starts right after "PE\0\0"
-
-        machine        = struct.unpack_from("<H", d, coff_base)[0]
-        num_sections   = struct.unpack_from("<H", d, coff_base + 2)[0]
-        opt_hdr_size   = struct.unpack_from("<H", d, coff_base + 16)[0]
+        coff_base    = e_lfanew + 4
+        machine      = struct.unpack_from("<H", d, coff_base)[0]
+        num_sections = struct.unpack_from("<H", d, coff_base + 2)[0]
+        opt_hdr_size = struct.unpack_from("<H", d, coff_base + 16)[0]
 
         if machine == self.IMAGE_FILE_MACHINE_AMD64:
             self.arch = CS_ARCH_X86
@@ -202,28 +188,23 @@ class PEParser:
         else:
             raise ValueError(f"unsupported PE machine: {hex(machine)}")
 
-        opt_base = coff_base + 20  # optional header starts here
+        opt_base = coff_base + 20
         magic    = struct.unpack_from("<H", d, opt_base)[0]
 
         if magic == 0x20b:  # PE32+
             self.image_base = struct.unpack_from("<Q", d, opt_base + 24)[0]
-            self.entry      = struct.unpack_from("<I", d, opt_base + 16)[0]  # RVA
-            # data directories start at opt_base+112 for PE32+
-            dd_offset = opt_base + 112
+            self.entry      = struct.unpack_from("<I", d, opt_base + 16)[0]
+            dd_offset       = opt_base + 112
         elif magic == 0x10b:  # PE32
             self.image_base = struct.unpack_from("<I", d, opt_base + 28)[0]
-            self.entry      = struct.unpack_from("<I", d, opt_base + 16)[0]  # RVA
-            # data directories start at opt_base+96 for PE32
-            dd_offset = opt_base + 96
+            self.entry      = struct.unpack_from("<I", d, opt_base + 16)[0]
+            dd_offset       = opt_base + 96
         else:
             raise ValueError(f"unknown optional header magic: {hex(magic)}")
 
-        # section table: immediately after optional header
         sect_base = opt_base + opt_hdr_size
         self._parse_sections(sect_base, num_sections)
 
-        # import directory table is data directory index 1
-        # each data directory entry is 8 bytes: RVA (4) + size (4)
         import_rva  = struct.unpack_from("<I", d, dd_offset + 8)[0]
         import_size = struct.unpack_from("<I", d, dd_offset + 12)[0]
         if import_rva and import_size:
@@ -231,100 +212,76 @@ class PEParser:
 
     def _parse_sections(self, base: int, count: int):
         d = self.data
-        # each IMAGE_SECTION_HEADER is 40 bytes
         for i in range(count):
-            off  = base + i * 40
-            name = d[off:off+8].rstrip(b"\x00").decode("ascii", errors="replace")
+            off      = base + i * 40
+            name     = d[off:off+8].rstrip(b"\x00").decode("ascii", errors="replace")
             vsize    = struct.unpack_from("<I", d, off + 8)[0]
-            vaddr    = struct.unpack_from("<I", d, off + 12)[0]   # RVA
+            vaddr    = struct.unpack_from("<I", d, off + 12)[0]
             raw_size = struct.unpack_from("<I", d, off + 16)[0]
             raw_off  = struct.unpack_from("<I", d, off + 20)[0]
-            sz = min(vsize, raw_size)
-            self.sections[name] = (raw_off, sz, vaddr)
+            self.sections[name] = (raw_off, min(vsize, raw_size), vaddr)
 
     def _parse_imports(self, import_rva: int):
-        # walk the Import Directory Table
-        # each entry (IMAGE_IMPORT_DESCRIPTOR) is 20 bytes:
-        #   OriginalFirstThunk (4), TimeDateStamp (4), ForwarderChain (4),
-        #   Name RVA (4), FirstThunk/IAT RVA (4)
-        # table ends with an all-zero entry
-        d = self.data
+        d      = self.data
         offset = self._rva_to_offset(import_rva)
         if offset is None:
             return
 
-        entry_size = 20
         while True:
             orig_thunk = struct.unpack_from("<I", d, offset)[0]
             name_rva   = struct.unpack_from("<I", d, offset + 12)[0]
             iat_rva    = struct.unpack_from("<I", d, offset + 16)[0]
 
             if name_rva == 0:
-                break  # end of import table
+                break
 
-            dll_off = self._rva_to_offset(name_rva)
+            dll_off  = self._rva_to_offset(name_rva)
             dll_name = ""
             if dll_off is not None:
                 dll_name = d[dll_off:dll_off+128].split(b"\x00")[0].decode("ascii", errors="replace")
-                # strip extension for readability: KERNEL32.DLL -> KERNEL32
                 dll_name = dll_name.upper().replace(".DLL", "").replace(".EXE", "")
 
-            # walk the thunk array to get function names
             thunk_rva = orig_thunk if orig_thunk else iat_rva
             thunk_off = self._rva_to_offset(thunk_rva)
             iat_off   = self._rva_to_offset(iat_rva)
 
             if thunk_off is not None and iat_off is not None:
-                thunk_size = 8 if self.bits == 64 else 4
-                fmt        = "<Q" if self.bits == 64 else "<I"
+                thunk_size   = 8 if self.bits == 64 else 4
+                fmt          = "<Q" if self.bits == 64 else "<I"
                 ordinal_flag = 0x8000000000000000 if self.bits == 64 else 0x80000000
 
                 i = 0
                 while True:
                     thunk_val = struct.unpack_from(fmt, d, thunk_off + i * thunk_size)[0]
-                    iat_va    = struct.unpack_from(fmt, d, iat_off   + i * thunk_size)[0]
                     if thunk_val == 0:
                         break
 
                     if thunk_val & ordinal_flag:
-                        # import by ordinal — no name available
                         func_name = f"ord_{thunk_val & 0xffff}"
                     else:
-                        # import by name: thunk_val is RVA to IMAGE_IMPORT_BY_NAME
-                        # skip 2-byte hint, then null-terminated name
                         hint_off = self._rva_to_offset(thunk_val & 0x7fffffff)
                         if hint_off is not None:
                             func_name = d[hint_off+2:hint_off+130].split(b"\x00")[0].decode("ascii", errors="replace")
                         else:
                             func_name = "unknown"
 
-                    # IAT VA at runtime = image_base + iat_rva + i*thunk_size
-                    # at load time (before relocs) it holds the RVA of the thunk
-                    # we store the *file offset of the IAT slot* -> resolved name
-                    # so the disassembler can match call [rip+x] -> IAT slot -> name
                     iat_slot_rva = iat_rva + i * thunk_size
                     self.imports[iat_slot_rva] = f"{dll_name}!{func_name}"
                     i += 1
 
-            offset += entry_size
+            offset += 20
 
     def _rva_to_offset(self, rva: int):
-        # convert a Relative Virtual Address to a file offset
-        # by finding which section contains it
         for name, (raw_off, sz, vaddr) in self.sections.items():
             if vaddr <= rva < vaddr + sz:
                 return raw_off + (rva - vaddr)
         return None
 
     def get_text(self):
-        # prefer .text, fall back to first section with execute flag
-        # (some packers put code in sections with non-standard names)
-        target = ".text"
-        if target in self.sections:
-            raw_off, sz, vaddr = self.sections[target]
+        if ".text" in self.sections:
+            raw_off, sz, vaddr = self.sections[".text"]
             return self.data[raw_off:raw_off+sz], self.image_base + vaddr
 
-        # fallback: first non-empty section
         for name, (raw_off, sz, vaddr) in self.sections.items():
             if sz > 0:
                 return self.data[raw_off:raw_off+sz], self.image_base + vaddr
@@ -332,7 +289,6 @@ class PEParser:
         raise RuntimeError("cannot find executable section in PE")
 
     def get_strings(self, min_len=5):
-        # .rdata in PE is roughly equivalent to .rodata in ELF
         target = ".rdata"
         if target in self.sections:
             raw_off, sz, _ = self.sections[target]
@@ -352,18 +308,14 @@ class PEParser:
 
 
 # ----------------------------------------------------------------
-# PE symbol resolver — maps IAT slot RVAs to "DLL!FuncName" strings
-# the PE parser already built the imports dict; this class wraps it
-# with the same interface as ELF SymbolResolver so Disassembler
-# doesn't need to know which format it's working with
+# PE symbol resolver
 # ----------------------------------------------------------------
 class PESymbolResolver:
     def __init__(self, pe: PEParser):
         self.pe   = pe
-        self.syms = {}   # absolute VA -> "DLL!func"
+        self.syms = {}
 
     def load(self):
-        # convert RVA-keyed imports to absolute VA
         for rva, name in self.pe.imports.items():
             va = self.pe.image_base + rva
             self.syms[va] = name
@@ -373,23 +325,22 @@ class PESymbolResolver:
 
 
 # ----------------------------------------------------------------
-# symbol resolver — reads .dynsym + .dynstr to map call addresses
-# to import names so the LLM gets "call <read>" not "call 0x1040"
+# ELF symbol resolver
 # ----------------------------------------------------------------
 class SymbolResolver:
     def __init__(self, elf: ELFParser):
         self.elf  = elf
-        self.syms = {}  # vaddr -> name
+        self.syms = {}
 
     def load(self):
         d = self.elf.data
         if ".dynsym" not in self.elf.sections or ".dynstr" not in self.elf.sections:
-            return  # statically linked or fully stripped
+            return
 
         sym_off, sym_sz, _ = self.elf.sections[".dynsym"]
         str_off, _,      _ = self.elf.sections[".dynstr"]
 
-        entry_size = 24  # sizeof(Elf64_Sym)
+        entry_size = 24
         for i in range(sym_sz // entry_size):
             base     = sym_off + i * entry_size
             st_name  = struct.unpack_from("<I", d, base)[0]
@@ -407,12 +358,6 @@ class SymbolResolver:
 
 # ----------------------------------------------------------------
 # disassembler + hotspot detector
-# classifies instructions into categories the LLM should look at:
-#   call:* — calls to known libc/syscall wrappers
-#   indirect_call — function pointer dispatch
-#   branch_condition — cmp/test + jcc chain (parser logic)
-#   bulk_memop — rep movs/stos (buffer copy)
-#   struct_access — lea with scaled index (struct/array walk)
 # ----------------------------------------------------------------
 class Disassembler:
     INTERESTING_CALLS = {
@@ -426,14 +371,14 @@ class Disassembler:
         "open", "fopen", "mmap", "pread",
     }
 
-    def __init__(self, code: bytes, base: int, arch, mode, resolver: SymbolResolver):
+    def __init__(self, code: bytes, base: int, arch, mode, resolver):
         self.code     = code
         self.base     = base
         self.resolver = resolver
         self.md       = Cs(arch, mode)
         self.md.detail = True
         self.insns    = []
-        self.hotspots = []  # list of (reason, center_index)
+        self.hotspots = []
 
     def disassemble(self):
         for insn in self.md.disasm(self.code, self.base):
@@ -450,12 +395,10 @@ class Disassembler:
         op = insn.op_str.lower()
 
         if mn == "call":
-            # try to resolve target to a symbol name
             target = self._call_target(insn)
             sym    = self.resolver.resolve(target)
             if sym and any(fn in sym for fn in self.INTERESTING_CALLS):
                 return f"call:{sym}"
-            # indirect call = function pointer / vtable
             if "[" in op or (op and op[0] == "r"):
                 return "indirect_call"
 
@@ -496,7 +439,6 @@ class Disassembler:
         return "\n".join(lines)
 
     def dedup_hotspots(self) -> list:
-        # remove hotspots whose center is too close to an already-selected one
         used, out = set(), []
         for reason, center in self.hotspots:
             if not any(abs(center - c) < BLOCK_WINDOW // 2 for c in used):
@@ -506,8 +448,7 @@ class Disassembler:
 
 
 # ----------------------------------------------------------------
-# LLM backend — explains what a code block does
-# prompt is tuned for static analysis / RE, structured JSON output
+# LLM backend
 # ----------------------------------------------------------------
 class LLMAnalyzer:
     SYSTEM = (
@@ -532,9 +473,8 @@ class LLMAnalyzer:
     def analyze(self, block_text: str, strings: list) -> dict:
         ctx = ""
         if strings:
-            sample = strings[:20]
             ctx = "\n\nStrings found in binary (may be referenced by this code):\n"
-            ctx += "\n".join(f"  {s}" for s in sample)
+            ctx += "\n".join(f"  {s}" for s in strings[:20])
 
         prompt = f"Analyze this disassembly block:{ctx}\n\n```asm\n{block_text}\n```"
         raw    = self._dispatch(prompt)
@@ -577,6 +517,7 @@ class LLMAnalyzer:
             },
             json={
                 "model": "llama-3.3-70b-versatile",
+                "temperature": 0,
                 "messages": [
                     {"role": "system", "content": self.SYSTEM},
                     {"role": "user",   "content": prompt},
@@ -623,8 +564,7 @@ class LLMAnalyzer:
 
 
 # ----------------------------------------------------------------
-# report writer — markdown, one file per binary run
-# naming: <binary_name>_<md5[:8]>.md
+# report writer
 # ----------------------------------------------------------------
 class ReportWriter:
     def __init__(self, binary_path: str):
@@ -637,7 +577,7 @@ class ReportWriter:
 
     def write_header(self, arch: str, text_size: int, n_insns: int, strings: list):
         self.lines += [
-            f"# binprobe: {self.name}",
+            f"# RVLLM: {self.name}",
             "",
             f"| field | value |",
             f"|-------|-------|",
@@ -688,20 +628,15 @@ class ReportWriter:
 # main
 # ----------------------------------------------------------------
 def _load_binary(raw: bytes):
-    """
-    Detect format from magic bytes and return (parser, resolver).
-    Both objects expose the same interface: arch, mode, entry,
-    get_text(), get_strings(), and resolver.syms / resolver.resolve().
-    """
     if raw[:4] == b"\x7fELF":
-        fmt = "ELF"
-        parser = ELFParser(raw)
+        fmt      = "ELF"
+        parser   = ELFParser(raw)
         parser.parse()
         resolver = SymbolResolver(parser)
         resolver.load()
     elif raw[:2] == b"MZ":
-        fmt = "PE"
-        parser = PEParser(raw)
+        fmt      = "PE"
+        parser   = PEParser(raw)
         parser.parse()
         resolver = PESymbolResolver(parser)
         resolver.load()
@@ -716,7 +651,6 @@ def run(binary_path: str, backend: str):
 
     fmt, parser, resolver = _load_binary(raw)
 
-    # arch label for the report header
     if parser.arch == CS_ARCH_X86:
         arch_name = "x86-64" if getattr(parser, "bits", 64) == 64 else "x86-32"
     else:
@@ -773,11 +707,11 @@ def run(binary_path: str, backend: str):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="binprobe — LLM-assisted static reverse engineering",
+        description="RVLLM — LLM-assisted static reverse engineering (PE and ELF)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="example:\n  python binprobe.py ./target --backend groq",
+        epilog="example:\n  python3 rvllm.py ./target.exe --backend groq\n  python3 rvllm.py ./target_elf --backend groq",
     )
-    ap.add_argument("binary",    help="ELF binary to analyze")
+    ap.add_argument("binary",    help="PE or ELF binary to analyze")
     ap.add_argument("--backend", default=ACTIVE_BACKEND,
                     choices=["claude", "groq", "openrouter"],
                     help=f"LLM backend to use (default: {ACTIVE_BACKEND})")
