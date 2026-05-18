@@ -22,7 +22,7 @@ Drop an unknown binary, get a markdown report.
 [+] patterns: Windows API invocation, stack frame setup, indirect call
 [+] symbols : KERNEL32!AcquireSRWLockExclusive, USER32, COMCTL32
 
-[+] report written: binprobe_out/test.exe_a788dd22.md
+[+] report written: rvllm_out/test.exe_a788dd22.md
 ```
 
 ---
@@ -84,7 +84,7 @@ API_KEYS = {
 ACTIVE_BACKEND = "groq"   # default backend
 
 BLOCK_WINDOW = 40         # instructions around each hotspot
-MAX_BLOCKS   = 3-7          # max blocks sent to LLM per run (cost control)
+MAX_BLOCKS   = 3-6          # max blocks sent to LLM per run (cost control)
 OUTPUT_DIR   = "./rvllm_out"
 ```
 
