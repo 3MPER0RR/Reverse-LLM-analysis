@@ -42,7 +42,7 @@ Drop an unknown binary, get a markdown report.
 ## Install
 
 ```bash
-git clone https://github.com/youruser/binprobe
+git clone https://github.com/3MPER0RR/binprobe
 cd binprobe
 python3 -m venv env
 source env/bin/activate
