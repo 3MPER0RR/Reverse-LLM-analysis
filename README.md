@@ -5,7 +5,7 @@ LLM-assisted static reverse engineering tool. Disassembles ELF and PE binaries, 
 Drop an unknown binary, get a markdown report.
 
 ```
-[*] loading winrar-x64-722it.exe
+[*] loading test.exe
 [*] format=PE  arch=x86-64  entry=0x1400011ab
 [*] 312 symbols/imports resolved
 [*] .text: 255676 bytes at 0x140001000
