@@ -22,7 +22,7 @@ Drop an unknown binary, get a markdown report.
 [+] patterns: Windows API invocation, stack frame setup, indirect call
 [+] symbols : KERNEL32!AcquireSRWLockExclusive, USER32, COMCTL32
 
-[+] report written: binprobe_out/winrar-x64-722it.exe_a788dd22.md
+[+] report written: binprobe_out/test.exe_a788dd22.md
 ```
 
 ---
