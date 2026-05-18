@@ -550,6 +550,26 @@ class LLMAnalyzer:
 
     def _parse(self, text: str) -> dict:
         text = text.strip()
+        # strip markdown fences if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        # find first { and last } to extract the JSON object
+        start = text.find("{")
+        end   = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start:end+1]
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {
+                "summary": "LLM response not parseable as JSON",
+                "detail": text,
+                "patterns": [],
+                "symbols_seen": [],
+            }
+
+    def _parse(self, text: str) -> dict:
+        text = text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         try:
