@@ -43,7 +43,7 @@ Drop an unknown binary, get a markdown report.
 
 ```bash
 git clone https://github.com/3MPER0RR/Reverse-LLM-analysis
-cd rvllm
+cd Reverse-LLM-analysis
 python3 -m venv env
 source env/bin/activate
 pip install capstone requests
