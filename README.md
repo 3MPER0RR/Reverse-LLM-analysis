@@ -43,7 +43,7 @@ Drop an unknown binary, get a markdown report.
 
 ```bash
 git clone https://github.com/3MPER0RR/Reverse-LLM-analysis
-cd binprobe
+cd rvllm
 python3 -m venv env
 source env/bin/activate
 pip install capstone requests
@@ -66,13 +66,13 @@ python3 rvllm.py target_elf --backend groq
 python3 rvllm.py target.exe --backend claude
 ```
 
-Report is written to `binprobe_out/<binary>_<md5[:8]>.md`.
+Report is written to `rvllm_out/<binary>_<md5[:8]>.md`.
 
 ---
 
 ## Configuration
 
-Edit the top of `binprobe.py`:
+Edit the top of `rvllm.py`:
 
 ```python
 API_KEYS = {
@@ -105,7 +105,7 @@ time.sleep(1.5)
 | ELF64  | x86-64, AArch64 | `.dynsym` / `.dynstr` |
 | PE32+  | x86-64 | Import Directory Table |
 
-Stripped ELF binaries fall back to PT_LOAD segment for code extraction.
+Stripped ELF aries fall back to PT_LOAD segment for code extraction.
 Packed PE binaries (UPX, Themida) are not supported — unpack first.
 
 ---
